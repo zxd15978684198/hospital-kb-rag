@@ -1,0 +1,113 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# IDE
+.idea/
+references/**
+
+# 对标源码切片（只读参考，不入库；不忽略的话 ruff 全仓扫描会报 47 个历史错误）
+.tmp_ref/
+
+# 迁库演练的工作目录（快照、日志、驱动脚本）：可由 scripts/export_metadata.py 随时重生成，
+# 里面含真实业务正文，不入库。
+.tmp_migration/
+
+# 本地环境变量：core/settings.py 里 SettingsConfigDict(env_prefix="PYKNORA_", env_file=".env")，
+# 该文件含库密码与 JWT secret，绝不入库；只放行示例文件。
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# 测试与静态检查缓存（pytest/ruff 会自建 .gitignore，这里兜底防 --no-ignore 场景）
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# VS Code（.idea/ 已在上方单独列出；若要共享 settings.json、launch.json，用 ! 规则放行）
+.vscode/
+
+# 操作系统杂项
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 本地日志
+*.log
+
+# ── PyTorch inductor 编译缓存：装 --extra local-embed 跑本地 embedding 时在仓库根生成
+#    （实测磁盘上已有 torchinductor_Administrator/ 空目录；git 不跟踪空目录所以未暴露，
+#     一旦生成 .so / .py 分片就是数百 MB，会直接出现在 git status 里）
+torchinductor_*/
+
+# ── ty 类型检查缓存：dev extras 里有 ty>=0.0.1a7；上面已忽略 .ruff_cache/.mypy_cache，漏了它
+.ty_cache/
+
+# ── Agent 工具本地状态：本仓库明确供 Codex / Claude Code / DSH 等协作，
+#    这些工具默认在仓库根写会话、权限、缓存，属个人环境，不入库
+.claude/
+.codex/
+.dsh/
+.agents/
+.workbuddy/
+
+# ── 容器本地覆盖：AGENTS.md §2「别人机器常见 5434 + pyknora-pg-p0」，
+#    端口/库名差异必须留在本地覆盖文件，入库会污染别人的环境
+docker-compose.override.yml
+docker-compose.*.local.yml
+
+# ── 进程与运行产物（scripts/run_worker.py / uvicorn 落盘时；现有 *.log 盖不到这些）
+*.pid
+*.out
+nohup.out
+
+# ── 覆盖率 / JUnit 报告：现有 .coverage 与 .coverage.* 盖不到不带点的写法
+coverage.xml
+junit*.xml
+
+# ── 迁库与备份裸文件：scripts/export_metadata.py 的 --out 是自由参数，
+#    默认 .tmp_migration/ 已忽略，这里兜底被填成相对路径的情况
+*.dump
+*.pgdump
+*.sql.gz
+
+# ── 补丁残留
+*.orig
+*.rej
+
+# ── 模型权重缓存兜底（HF_HOME / TORCH_HOME / SENTENCE_TRANSFORMERS_HOME 被指进仓库时）
+#    必须带前导斜杠：写成 models/ 会连 src/pyknora/models/ 一起忽略
+/models/
+/.cache/
+
+# ── 放行子模块 gitlink：上面的 references/** 会连 references/WeKnora 这个 gitlink 一并忽略，
+#    导致 git status 看不到子模块指针变化（bump 了 WeKnora 不会报警）、重新 submodule add 失败
+!references/WeKnora
+
+# ── Day3 离线评测的运行产物：eval/run_eval.py 每次运行写一个子目录
+#    （raw.jsonl / summary.json / report.md，含真实语料片段与模型回答），可随时重跑再生成，
+#    所以不入库；入库的是 eval_set / 两份 config / runner 这些"能重放出数字"的东西。
+#    eval/reports/ 留给汇总报告（当前仓库尚未生成，先占位忽略，免得哪天手工产物被误 add）。
+eval/results/
+eval/reports/
+
+# ── pytest 的 tmp_path 兜底目录：某些用例传了相对 basetemp 时 pytest 会在
+#    当前工作目录建 pytest-of-<用户名>/，里面全是临时产物，不该入库。
+#    用 pytest-of-*/ 而不是固定用户名，换机器（Administrator / runner / dev）都覆盖。
+/pytest-of-*/
+
+# ── 一次性探针脚本/截图/日志（2026-11-03 清理后仍可能出现，统一兜底）
+#    已确认 `git ls-files` 里没有 .tmp* 跟踪文件，加通配不会误伤
+/.tmp*
+/web/.tmp*
