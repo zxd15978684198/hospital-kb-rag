@@ -1,0 +1,249 @@
+"""S09 / A3：解析与切片。
+
+A3 断言：3 页 PDF 切出的 chunk 数 ≥ 3，每块 page_no 非空、char_start < char_end。
+PDF 用手工构造的最小内容，不依赖外部样本文件。
+"""
+
+from __future__ import annotations
+
+import io
+
+import pytest
+
+from pyknora.core.errors import AppError, ErrorCode
+from pyknora.services.ingest.parser import Block, ParsedText, parse
+from pyknora.services.ingest.splitter import chunk_parsed
+
+
+def _make_text_payload(paras: int) -> bytes:
+    return "\n\n".join(
+        f"第 {i} 段：PyKnora 增量索引测试语料，用于验证切片边界与位置映射。" * 3
+        for i in range(paras)
+    ).encode()
+
+
+def _make_pdf(pages: int) -> bytes:
+    """构造一个多页 PDF，每页一段文本。手写最小 PDF 结构，不引第三方生成器。"""
+    objects: list[bytes] = []
+    page_ids: list[int] = []
+
+    # 1: Catalog, 2: Pages, 然后每页 2 个对象（Page + Contents）
+    n_pages = pages
+    first_page_id = 3
+    for i in range(n_pages):
+        page_ids.append(first_page_id + i * 2)
+
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    kids = " ".join(f"{pid} 0 R" for pid in page_ids).encode()
+    objects.append(
+        b"<< /Type /Pages /Count " + str(n_pages).encode() + b" /Kids [" + kids + b"] >>"
+    )
+
+    for i in range(n_pages):
+        # 必须是合法的内容流：文本要包在 BT/ET 里并显式设置字体，
+        # 裸字符串 pypdf 提取不出来（首版就是这样，3 页全返回空）。
+        # 每页写足 ~300 字符，让 chunk_size=200 必然切出多块，page_no 才能被真正验证。
+        body = f"Page {i + 1} about PyKnora incremental indexing and permission isolation. " * 5
+        content = f"BT /F1 12 Tf 72 720 Td ({body}) Tj ET".encode()
+        page_obj = (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            b"/Contents " + str(first_page_id + i * 2 + 1).encode() + b" 0 R "
+            b"/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 "
+            b"/BaseFont /Helvetica >> >> >> >>"
+        )
+        stream = (
+            b"<< /Length "
+            + str(len(content)).encode()
+            + b" >>\nstream\n"
+            + content
+            + b"\nendstream"
+        )
+        objects.append(page_obj)
+        objects.append(stream)
+
+    out = io.BytesIO()
+    out.write(b"%PDF-1.4\n")
+    offsets = [0]
+    for idx, body in enumerate(objects, start=1):
+        offsets.append(out.tell())
+        out.write(str(idx).encode() + b" 0 obj\n" + body + b"\nendobj\n")
+    xref_pos = out.tell()
+    count = len(objects) + 1
+    out.write(b"xref\n0 " + str(count).encode() + b"\n")
+    out.write(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        out.write(f"{off:010d} 00000 n \n".encode())
+    out.write(
+        b"trailer\n<< /Size "
+        + str(count).encode()
+        + b" /Root 1 0 R >>\nstartxref\n"
+        + str(xref_pos).encode()
+        + b"\n%%EOF\n"
+    )
+    return out.getvalue()
+
+
+def test_parse_plain_text() -> None:
+    parsed = parse(_make_text_payload(2), "a.txt")
+    assert parsed.parser == "plain"
+    assert len(parsed.blocks) == 2
+
+
+def test_parse_markdown_keeps_heading_path() -> None:
+    md = b"# Title\n\ncontent one\n\n## Sub\n\ncontent two\n"
+    parsed = parse(md, "a.md")
+    assert parsed.parser == "markdown"
+    paths = [b.heading_path for b in parsed.blocks if b.heading_path]
+    assert any("Title / Sub" in p for p in paths)
+
+
+def test_parse_html_strips_tags() -> None:
+    html = b"<html><body><p>alpha</p><script>bad()</script><p>beta</p></body></html>"
+    parsed = parse(html, "a.html")
+    assert parsed.parser == "regex-html"
+    joined = " ".join(b.text for b in parsed.blocks)
+    assert "alpha" in joined and "beta" in joined
+    assert "bad()" not in joined
+
+
+def test_unsupported_format_raises() -> None:
+    with pytest.raises(AppError) as exc:
+        parse(b"data", "a.exe")
+    assert exc.value.code == ErrorCode.UNSUPPORTED_FORMAT
+
+
+def test_pdf_three_pages_yields_page_numbers() -> None:
+    """A3 前半：3 页 PDF 切出的 chunk 数 ≥ 3，每块 page_no 非空。"""
+    parsed = parse(_make_pdf(3), "doc.pdf")
+    chunks = chunk_parsed(parsed, chunk_size=200, chunk_overlap=20)
+    assert len(chunks) >= 3
+    assert all(c.page_no is not None for c in chunks)
+    assert {c.page_no for c in chunks} == {1, 2, 3}
+
+
+def test_a3_all_chunks_have_ordered_offsets() -> None:
+    """A3 后半：每块 char_start < char_end 全部成立。"""
+    parsed = parse(_make_pdf(3), "doc.pdf")
+    chunks = chunk_parsed(parsed, chunk_size=200, chunk_overlap=20)
+    assert all(c.char_start < c.char_end for c in chunks)
+
+
+def test_ordinals_are_contiguous_from_zero() -> None:
+    parsed = parse(_make_text_payload(3), "a.txt")
+    chunks = chunk_parsed(parsed, chunk_size=120, chunk_overlap=10)
+    assert [c.ordinal for c in chunks] == list(range(len(chunks)))
+
+
+def test_offsets_are_global_not_block_local() -> None:
+    """偏移必须是全文坐标，否则 citations 拼不回原文。"""
+    parsed = ParsedText(blocks=[Block(text="AAAA"), Block(text="BBBB")], parser="test")
+    chunks = chunk_parsed(parsed, chunk_size=10, chunk_overlap=0)
+    full = parsed.full_text
+    for c in chunks:
+        assert full[c.char_start : c.char_end] == c.content
+
+
+def test_overlap_must_be_less_than_chunk_size() -> None:
+    parsed = ParsedText(blocks=[Block(text="x" * 100)], parser="test")
+    with pytest.raises(AppError) as exc:
+        chunk_parsed(parsed, chunk_size=50, chunk_overlap=50)
+    assert exc.value.code == ErrorCode.INVALID_REQUEST
+
+
+def test_zero_chunk_size_rejected() -> None:
+    parsed = ParsedText(blocks=[Block(text="x")], parser="test")
+    with pytest.raises(AppError):
+        chunk_parsed(parsed, chunk_size=0)
+
+
+def test_empty_parse_result_raises_parse_incomplete() -> None:
+    with pytest.raises(AppError) as exc:
+        parse(b"   \n\n   ", "a.txt")
+    assert exc.value.code == ErrorCode.PARSE_FAILED
+
+
+def test_corrupt_pdf_becomes_parse_failed_not_a_crash() -> None:
+    """截断的 PDF 必须变成 `PARSE_FAILED`，不能把底层库的异常原样漏出去。
+
+    原样漏出的后果不是这一份文件解析失败，而是 Worker 的整个取件事务被回滚：
+    失败记录消失、作业常驻队头、队列停摆（见 tests/integration/test_ingest_poison.py）。
+    这里把边界钉在解析器上——它是有能力把"库的异常"翻译成"我们的错误码"的那一层。
+
+    2026-11-02：PDF 主路径由 pypdf 换成 `pdfplumber`（ADR 0008 D5 / N13），
+    契约从 `details == {"reason": "<异常类名>"}` 扩成
+    `{"reason": "broken", "error": "<异常类名>"}`——`reason` 变成稳定的机器可读枚举
+    （`broken` / `encrypted` / `empty` / `no_text_layer`），异常类名退到 `error` 里
+    只供排障。两者都不含消息正文。
+    """
+    truncated = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    with pytest.raises(AppError) as exc:
+        parse(truncated, "broken.pdf")
+
+    assert exc.value.code == ErrorCode.PARSE_FAILED
+    # details 只放枚举与异常类型名，不放消息：底层库的消息里可能夹着文件字节片段。
+    assert set(exc.value.details) == {"reason", "error"}
+    assert exc.value.details["reason"] == "broken"
+    assert "EOF marker" not in str(exc.value.details)
+
+
+def test_chunks_record_page_span_when_crossing_pages() -> None:
+    """跨页切片必须记下结束页（P2-D2）。
+
+    真实症状：4 页 PDF 里一块横跨第 3、4 页，`page_no` 只能存一个值 → 记 3。
+    用户从引用跳过去，后半段在第 4 页，界面上却只提示第 3 页。
+
+    这里构造两个不同页的块：块 A 占 60 字符（第 1 页），块 B 第 2 页且内部有句读。
+    chunk_size=80 时断点会落在第 2 页的句号之后 → 这一块真的跨页（1 → 2）。
+    注意块之间的 `\n\n` 也是断点候选，所以第 2 页必须自带句读，否则会正好断在页边界上。
+    """
+    parsed = ParsedText(
+        blocks=[
+            Block(text="A" * 60, page_no=1),
+            Block(text="B" * 5 + "。" + "C" * 100, page_no=2),
+        ],
+        parser="test",
+    )
+    chunks = chunk_parsed(parsed, chunk_size=80, chunk_overlap=0)
+
+    crossing = [c for c in chunks if c.page_no != c.page_end_no]
+    assert crossing, "没有跨页切片，这个用例就白写了"
+    first = crossing[0]
+    assert (first.page_no, first.page_end_no) == (1, 2)
+    # 结束页必须覆盖到末字符所在页：char_end 是开区间端点（页边界在 62）。
+    assert first.char_end > 62, "char_end 没越过第 1 页末尾，块其实没跨页"
+
+
+def test_single_page_chunks_have_equal_page_span() -> None:
+    """单页切片的起止页相同；没有页码的文档两者都为空。"""
+    parsed = ParsedText(
+        blocks=[Block(text="x" * 40, page_no=1), Block(text="y" * 40, page_no=1)],
+        parser="test",
+    )
+    for chunk in chunk_parsed(parsed, chunk_size=20, chunk_overlap=0):
+        assert chunk.page_no == 1
+        assert chunk.page_end_no == 1
+
+    no_pages = chunk_parsed(ParsedText(blocks=[Block(text="z" * 30)], parser="test"))
+    assert [(c.page_no, c.page_end_no) for c in no_pages] == [(None, None)]
+
+
+def test_chunk_rejects_inverted_page_span() -> None:
+    """起止页反向必须被模型校验挡住（引用范围反向比缺信息更糟）。"""
+    from pyknora.schemas.chunk import Chunk
+
+    with pytest.raises(ValueError, match="page_end_no"):
+        Chunk(
+            ordinal=0,
+            content="abc",
+            page_no=3,
+            page_end_no=2,
+            char_start=0,
+            char_end=3,
+        )
+
+
+def test_chunk_rejects_inverted_offsets() -> None:
+    from pyknora.schemas.chunk import Chunk
+
+    with pytest.raises(ValueError):
+        Chunk(ordinal=0, content="x", char_start=10, char_end=5)
