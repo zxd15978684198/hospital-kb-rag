@@ -1,0 +1,66 @@
+[project]
+name = "pyknora"
+version = "0.1.0"
+description = "PyKnora: enterprise knowledge base with incremental indexing and permission isolation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "pgvector>=0.3.6",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "python-multipart>=0.0.17",
+    "httpx>=0.27",
+    "python-docx>=1.2.0",
+    "bcrypt>=4.1",
+    "openpyxl>=3.1.5",
+    "pdfplumber>=0.11.10",
+    "python-pptx>=1.0.2",
+    "striprtf>=0.0.35",
+    "xlrd>=2.0.2",
+    "rapidocr-onnxruntime>=1.4.4",
+    "pypdfium2>=5.14.0",
+]
+
+[project.optional-dependencies]
+local-embed = [
+    "sentence-transformers>=3.3",
+]
+dev = [
+    # 仅 tests/unit/test_parse_pdf.py::test_encrypted_pdf_reports_reason 用它现造加密 PDF。
+    # 运行时不读 PDF（主路径是 pdfplumber，渲染是 pypdfium2），别把它当依赖用。
+    "pypdf>=6.21.3",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "ty>=0.0.1a7",
+]
+
+[project.scripts]
+pyknora = "pyknora:main"
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[dependency-groups]
+dev = [
+    "detect-secrets>=1.5.0",
+]

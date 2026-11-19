@@ -1,0 +1,51 @@
+{
+  "generated_at": "2026-11-19T21:55:43+08:00",
+  "source_note": "5 份语料全部由本文件生成，指向虚构的「澜川实业有限公司」，不复制任何外部文档。target=main 进 workspace A 的评测 KB，target=forbidden 只上传到 workspace B，供 deny 样本证明「越权被拦」而非「库不存在」。语料不入库（.gitignore 的 .tmp_ref/），换机器重跑 --prepare 即可重新生成同名同内容的文件。",
+  "files": [
+    {
+      "name": "内部财务管理制度.md",
+      "path": ".tmp_ref/eval_corpus/内部财务管理制度.md",
+      "bytes": 2071,
+      "sha256": "80174c6f0161c239c3db0462e3d5b2ade5b520fa3060d649780c5a120adf4306",
+      "kind": "md",
+      "target": "main",
+      "description": "制度主文档；条款号、固定说法与审批流程是 exact_term 类样本的出处"
+    },
+    {
+      "name": "员工手册v1.md",
+      "path": ".tmp_ref/eval_corpus/员工手册v1.md",
+      "bytes": 751,
+      "sha256": "f354818a503cb5b34f474d5e9fe73c058d9f17520e4eea295dd6ce57bcc1daf6",
+      "kind": "md",
+      "target": "main",
+      "description": "手册旧版；随后上传 v2 作为同一逻辑文档的新版本，把 active_index_version 顶到 2"
+    },
+    {
+      "name": "员工手册v2.md",
+      "path": ".tmp_ref/eval_corpus/员工手册v2.md",
+      "bytes": 1226,
+      "sha256": "d0a11fe72f4e28d86643a67fafb623e4ee7629831d9b0f827fe865a36cc819ec",
+      "kind": "md",
+      "target": "main",
+      "description": "手册现行版；重传后 v1 的切片应被 retire，只有 v2 现行"
+    },
+    {
+      "name": "团建与年会通知.md",
+      "path": ".tmp_ref/eval_corpus/团建与年会通知.md",
+      "bytes": 1353,
+      "sha256": "5be0a85aa185084450a847cbcb7fe7cd28ebc7e62a84226d6a40dc8a83f5b9bd",
+      "kind": "md",
+      "target": "main",
+      "description": "无关干扰文档；制造 no_evidence 与 top5 噪声，不得命中被测问题"
+    },
+    {
+      "name": "财务内部预算.md",
+      "path": ".tmp_ref/eval_corpus/财务内部预算.md",
+      "bytes": 1105,
+      "sha256": "4dee099144380155e372be06ca1d39eb9beef17b34ae37f8d77180d1b7cc6c8b",
+      "kind": "md",
+      "target": "forbidden",
+      "description": "越权语料，仅上传到 workspace B；A 的令牌问它必须 404 且无片段"
+    }
+  ]
+}
