@@ -15,6 +15,9 @@ wheels/
 # 本地临时参考目录（不参与项目运行）
 .tmp_ref/
 
+# 本地临时工作目录（pt3 为一次性实验目录，内容不入库）
+/pt3/
+
 # 迁库演练的工作目录（快照、日志、驱动脚本）：可由 scripts/export_metadata.py 随时重生成，
 # 里面含真实业务正文，不入库。
 .tmp_migration/
@@ -97,6 +100,10 @@ eval/reports/
 #    当前工作目录建 pytest-of-<用户名>/，里面全是临时产物，不该入库。
 #    用 pytest-of-*/ 而不写死用户名，换机器、换 runner 都覆盖。
 /pytest-of-*/
+
+# ── pytest 的 cache 兜底目录：某些调用方式会在仓库根建 pytest-cache-files-<随机串>/，
+#    里面是临时产物，不该入库。同样不写死随机串。
+/pytest-cache-files-*/
 
 # ── 一次性探针脚本/截图/日志（2026-11-03 清理后仍可能出现，统一兜底）
 #    已确认 `git ls-files` 里没有 .tmp* 跟踪文件，加通配不会误伤
