@@ -274,12 +274,18 @@ jobs:
       - name: Build web image (standalone)
         run: docker build --build-arg API_PROXY_TARGET=http://api:8010 -t pyknora-web:ci ./web
 
-      # 4) 镜像体检：非 root 与体积上限。report 模式（默认）不阻断，
-      #    要变成门禁就在 pyproject 里加 [tool.gatekeeper.image] max_size_mb。
-      # 这个 job 不装 uv（只有 docker 与 python3 就够了）：脚本只用标准库，
-      # 之前写 uv run python 在 runner 上是 "uv: command not found"（exit 127）。
-      - name: Container report
-        run: python3 scripts/container_report.py pyknora-api:ci
+      # 4) 镜像体检：非 root 与体积。report 模式，不阻断。
+      #
+      #    这里不再调 scripts/container_report.py：那个脚本（gatekeeper 生成物）
+      #    只认 --root，然后按 compose 里第一个服务去查镜像。本项目第一个服务是
+      #    db（pgvector），栈在 CI 里没起、镜像也没拉，6 项会全部 skip；而传进去的
+      #    `pyknora-api:ci` 是位置参数，argparse 直接 exit 2。
+      #    CI 只需要确认刚构建的镜像本身，一条 inspect 就够；要跑完整 6 项体检
+      #    请在本机 docker compose up -d --wait 之后跑那个脚本。
+      - name: Image report (default user, size)
+        run: docker image inspect --format 'user={{.Config.User}} size={{.Size}}B' pyknora-api:ci
+      - name: Image report (web)
+        run: docker image inspect --format 'user={{.Config.User}} size={{.Size}}B' pyknora-web:ci
 
   build:
     name: Package (sdist + wheel)
