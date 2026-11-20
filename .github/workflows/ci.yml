@@ -202,7 +202,7 @@ jobs:
           # 每个外键都必然带 REFERENCES 子句，但未必写成 "FOREIGN KEY ..."——
           # 列内联写法（col uuid REFERENCES t(id)）同样建外键。只数 FOREIGN KEY
           # 会漏掉 9 个，期望值 10 而库里 15，断言永远为假。
-          expected=$(grep -h 'REFERENCES' migrations/*.sql | grep -v -E '^[[:space:]]*--' | wc -l)
+          expected=$(grep -h 'REFERENCES' migrations/*.sql | grep -vcE '^[[:space:]]*--' || true)
           actual=$(psql "$PYKNORA_PSQL_URL" -tAc "SELECT count(*) FROM pg_constraint WHERE contype = 'f'")
           echo "foreign keys: migrations=$expected database=$actual"
           if [ "$expected" -ne "$actual" ]; then
