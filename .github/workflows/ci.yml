@@ -70,8 +70,13 @@ jobs:
       # CI 侧语法检查：workflow 自己写错时，别等到都跑完了才发现。
       - name: actionlint (workflow syntax)
         run: |
-          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          ./actionlint -color
+          # 钉死版本：跟随 main 分支的安装脚本会让门禁口径随上游漂移，
+          # 且多一次 raw.githubusercontent 依赖（该域名抖动时整步失败）。
+          version=1.7.12
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" \
+            | tar -xz -C /tmp actionlint
+          /tmp/actionlint --version
+          /tmp/actionlint -color
 
   unit:
     name: Unit tests (no database)
@@ -194,7 +199,10 @@ jobs:
       - name: Assert foreign keys match migrations
         run: |
           set -euo pipefail
-          expected=$(grep -h 'FOREIGN KEY' migrations/*.sql | grep -v -E '^[[:space:]]*--' | wc -l)
+          # 每个外键都必然带 REFERENCES 子句，但未必写成 "FOREIGN KEY ..."——
+          # 列内联写法（col uuid REFERENCES t(id)）同样建外键。只数 FOREIGN KEY
+          # 会漏掉 9 个，期望值 10 而库里 15，断言永远为假。
+          expected=$(grep -h 'REFERENCES' migrations/*.sql | grep -v -E '^[[:space:]]*--' | wc -l)
           actual=$(psql "$PYKNORA_PSQL_URL" -tAc "SELECT count(*) FROM pg_constraint WHERE contype = 'f'")
           echo "foreign keys: migrations=$expected database=$actual"
           if [ "$expected" -ne "$actual" ]; then
