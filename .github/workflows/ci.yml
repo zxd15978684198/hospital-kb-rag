@@ -276,8 +276,10 @@ jobs:
 
       # 4) 镜像体检：非 root 与体积上限。report 模式（默认）不阻断，
       #    要变成门禁就在 pyproject 里加 [tool.gatekeeper.image] max_size_mb。
+      # 这个 job 不装 uv（只有 docker 与 python3 就够了）：脚本只用标准库，
+      # 之前写 uv run python 在 runner 上是 "uv: command not found"（exit 127）。
       - name: Container report
-        run: uv run python scripts/container_report.py pyknora-api:ci
+        run: python3 scripts/container_report.py pyknora-api:ci
 
   build:
     name: Package (sdist + wheel)
