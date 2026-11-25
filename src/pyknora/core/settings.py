@@ -38,7 +38,10 @@ class Settings(BaseSettings):
     env: str = "dev"
 
     # 数据库（本地 docker compose 映射到 5435，避开机器上常见的 5433/5434）
-    database_url: str = "postgresql+asyncpg://postgres:dev@127.0.0.1:5435/pyknora"
+    # 默认连 pyknora_app 而不是 postgres：postgres 是超级用户，天然 BYPASSRLS，
+    # 用它连库时 0011 的 ws_isolation 策略一行都不生效（`main.py` 启动时会对此告警）。
+    # 迁移走 `migrate` 服务（psql -U postgres），建表需要 owner，运行期不需要。
+    database_url: str = "postgresql+asyncpg://pyknora_app:pyknora_app_dev@127.0.0.1:5435/pyknora"
     db_container: str = "pyknora-pg"
 
     # Embedding：本地 HF 优先，可回落 OpenAI 兼容 HTTP

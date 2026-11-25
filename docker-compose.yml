@@ -16,7 +16,11 @@ name: pyknora
 
 x-api-env: &api-env
   # 容器内走服务名，不是 127.0.0.1：每个容器有自己的回环地址。
-  PYKNORA_DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-dev}@db:5432/pyknora
+  # 运行期连库用 pyknora_app（非表 owner、非 superuser、非 bypassrls）：
+  # postgres 是超级用户，天然 BYPASSRLS，会把 0011 建的 ws_isolation 策略整个绕过——
+  # 那时 RLS 只是"写在库里"，并不在拦数据。迁移仍用 postgres（见 migrate 服务），
+  # 因为建表/改表需要 owner 权限，而运行期不需要。
+  PYKNORA_DATABASE_URL: postgresql+asyncpg://pyknora_app:${PYKNORA_APP_PASSWORD:-pyknora_app_dev}@db:5432/pyknora
   PYKNORA_EMBEDDING_BACKEND: ${PYKNORA_EMBEDDING_BACKEND:-local}
   PYKNORA_EMBEDDING_MODEL_KEY: ${PYKNORA_EMBEDDING_MODEL_KEY:-BAAI/bge-small-zh-v1.5}
   PYKNORA_EMBEDDING_DIM: ${PYKNORA_EMBEDDING_DIM:-512}
@@ -114,7 +118,12 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    environment: *api-env
+    environment:
+      <<: *api-env
+      # worker 必须用自己的角色：它按 `FOR UPDATE SKIP LOCKED` 跨租户扫 ingestion_jobs，
+      # 而 ws_isolation 策略要求 app.workspace_id 有值 → 用 pyknora_app 时认领恒为 0 条，
+      # 任务永远 pending 且没有任何报错（0017 建这个角色的原因）。
+      PYKNORA_DATABASE_URL: postgresql+asyncpg://pyknora_worker:${PYKNORA_WORKER_PASSWORD:-pyknora_worker_dev}@db:5432/pyknora
     command: ["python", "scripts/run_worker.py"]
     # 镜像里的 HEALTHCHECK 探的是 API 的 http://127.0.0.1:8010/health；
     # worker 与 api 共用镜像但不监听任何端口，继承这条检查会永远 unhealthy，
