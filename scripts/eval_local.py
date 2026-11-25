@@ -18,6 +18,7 @@ CI 的 `eval` job 在 workflow 里手写了同样的三段（起 stub → 起 ap
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import socket
 import subprocess
@@ -25,6 +26,10 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DSN = "postgresql+asyncpg://pyknora_app:pyknora_app_dev@127.0.0.1:5433/pyknora"
@@ -103,6 +108,57 @@ def stop(proc: subprocess.Popen | None) -> None:
         proc.kill()
 
 
+# 两个默认角色的口令来自 `migrations/0003`（app）与 `migrations/0017`（worker）。
+# 换 DSN 时**用户名和口令必须一起换**：只换用户名的话，worker 会拿 app 的口令去连，
+# 回 `password authentication failed for user "pyknora_worker"`，而 worker 是常驻循环、
+# 连不上只会每轮打一条 traceback 继续转，于是入库任务永远 pending，
+# 门禁在 `wait_job` 里对每篇文档干等 600 秒 —— 表现为"跑不完"，不是"报错"。
+APP_ROLE, APP_PASSWORD = "pyknora_app", "pyknora_app_dev"
+WORKER_ROLE, WORKER_PASSWORD = "pyknora_worker", "pyknora_worker_dev"
+
+
+def derive_worker_dsn(api_dsn: str) -> str:
+    """把面向用户的 app DSN 换成能跨租户认领任务的 worker DSN。
+
+    为什么要换角色：`pyknora_app` 受 RLS 约束，用它认领 `ingestion_jobs` 恒为 0 条，
+    入库永远停在 pending 且**不报错**（这正是 `migrations/0017` 存在的理由）。
+    为什么口令也要换：见上面的常量注释——只换用户名会得到一个必然认证失败的 DSN。
+    显式传 `PYKNORA_WORKER_DATABASE_URL` 时仍然完全以它为准（生产口令各不相同）。
+    """
+    parts = urlsplit(api_dsn)
+    if parts.username != APP_ROLE:
+        # 已经是别的角色（postgres、自定义角色），原样返回，不去猜它的口令。
+        return api_dsn
+    netloc = f"{WORKER_ROLE}:{WORKER_PASSWORD}@{parts.hostname}"
+    if parts.port:
+        netloc += f":{parts.port}"
+    return urlunsplit(parts._replace(netloc=netloc))
+
+
+def probe_dsn(dsn: str, role: str) -> str | None:
+    """连得上返回 None，连不上返回一句面向人的原因。
+
+    为什么要在起栈之前查：worker 是常驻循环，DSN 错了它只会每轮打一条 traceback 接着转；
+    入库任务因此永远停在 pending，而门禁在 `wait_job` 里对每篇文档等 600 秒。
+    结果是"跑不完"而不是"报错"——排查成本极高（本次就是这么被误导的）。
+    这里花一秒把口令/角色错误摆到台面上。
+    """
+
+    async def _try() -> None:
+        engine = create_async_engine(dsn, pool_pre_ping=False, pool_size=1)
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_try())
+    except Exception as exc:  # noqa: BLE001 —— 这里要的就是把各种连接错误统一说人话
+        return f"{role} 连不上库：{type(exc).__name__}: {exc}".replace(dsn, "<dsn>")
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="eval 门禁：自带 stub 栈跑一遍")
     parser.add_argument("--baseline", default="eval/baselines/stub-hashing")
@@ -110,15 +166,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     api_dsn = os.environ.get("PYKNORA_DATABASE_URL") or DEFAULT_DSN
-    # worker 必须用能跨租户认领任务的角色：面向用户的 pyknora_app 受 RLS 限制，
-    # 用它认领 `ingestion_jobs` 恒为 0 条，入库会永远停在 pending（且不报错）。
-    worker_dsn = os.environ.get("PYKNORA_WORKER_DATABASE_URL") or api_dsn.replace(
-        "pyknora_app:", "pyknora_worker:"
-    ).replace("pyknora_app%40", "pyknora_worker%40")
+    worker_dsn = os.environ.get("PYKNORA_WORKER_DATABASE_URL") or derive_worker_dsn(api_dsn)
     stub_port, api_port = free_port(), free_port()
     stub_url = f"http://127.0.0.1:{stub_port}/v1"
     api_root = f"http://127.0.0.1:{api_port}"
     env = build_env(api_dsn, stub_url)
+
+    for dsn, role in ((api_dsn, "api"), (worker_dsn, "worker")):
+        problem = probe_dsn(dsn, role)
+        if problem is not None:
+            print(f"[eval-local] {problem}", file=sys.stderr)
+            return 2
 
     stub: subprocess.Popen | None = None
     worker: subprocess.Popen | None = None
