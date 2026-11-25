@@ -95,6 +95,10 @@ junit*.xml
 # ── 评测运行产物：每次运行写入子目录，包含原始语料片段与模型回答，不入库
 eval/results/
 eval/reports/
+# 由 make_configs.py / build_eval_set.py 生成，内容含本机 workspace / kb / document id
+eval/baseline_config.yaml
+eval/candidate_config.yaml
+eval/eval_set_v0.1.jsonl
 
 # ── pytest 的 tmp_path 兜底目录：某些用例传了相对 basetemp 时 pytest 会在
 #    当前工作目录建 pytest-of-<用户名>/，里面全是临时产物，不该入库。

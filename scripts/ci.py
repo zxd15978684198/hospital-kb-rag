@@ -405,6 +405,30 @@ RELEASE_STAGE = {
     ],
 }
 
+EVAL_STAGE = {
+    "id": "eval",
+    "title": "RAG regression gate (30-item fixed set)",
+    "why": (
+        "The thirty-case fixed set is the only thing that notices when retrieval, the evidence "
+        "gate, or citation wiring changes behaviour. The baseline was produced by a deterministic "
+        "stub model, so comparing against it only means something when the API under test talks to "
+        "that same stub: `scripts/eval_local.py` starts the stub plus a throwaway uvicorn on free "
+        "ports, runs the gate, and tears both down. That makes `--stage eval` locally equivalent to "
+        "the CI `eval` job. It is excluded from `all` because it needs PostgreSQL, a running ingest "
+        "worker, and a few minutes."
+    ),
+    "steps": [
+        {
+            "id": "eval-gate",
+            "label": "scripts/eval_local.py（自带 stub 栈）",
+            "argv": ["uv", "run", "python", "scripts/eval_local.py"],
+            "run": "uv run python scripts/eval_local.py",
+            "timeoutSeconds": 1800,
+            "always": False,
+        }
+    ],
+}
+
 DEPLOY_STAGE = {
     "id": "deploy",
     "title": "Deploy",
@@ -425,7 +449,7 @@ DEPLOY_STAGE = {
     ],
 }
 
-# IR 的 13 阶段顺序（ir.js 的 STAGE_IDS）。本地按同一顺序暴露，
+# IR 的 13 阶段顺序 + 本仓新增的 eval（第 14 个）。本地按同一顺序暴露，
 # 否则「本地绿、CI 红」只是被顺序藏起来的差异。
 STAGE_ORDER = [
     "lock",
@@ -437,6 +461,7 @@ STAGE_ORDER = [
     "security",
     "build",
     "integration",
+    "eval",
     "audit",
     "container",
     "release",
@@ -466,6 +491,7 @@ _BY_ID = {
         SECURITY_STAGE,
         BUILD_STAGE,
         INTEGRATION_STAGE,
+        EVAL_STAGE,
         AUDIT_STAGE,
         CONTAINER_STAGE,
         RELEASE_STAGE,

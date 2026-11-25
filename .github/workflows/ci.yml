@@ -226,6 +226,78 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # 与本地 `python scripts/ci.py --stage eval` 走同一条路径：
+  # scripts/eval_local.py 自己起 stub 假模型 + 入库 worker + 临时 uvicorn（空闲端口），
+  # 跑完即拆。所以"本地绿、CI 红"只可能是代码差异，不可能是栈搭法不同。
+  #
+  # 为什么 CI 里不接真模型：fork 的 PR 拿不到密钥，而且同输入两次跑措辞就变，
+  # 指标会跟着模型抖动——门禁一旦会自己抖，红灯就不再是信号。
+  eval:
+    name: Eval regression gate (deterministic stub LLM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: unit
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: pyknora
+        ports:
+          - "5433:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres -d pyknora"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # 只给迁移步骤用；下面跑门禁那步自己带 PYKNORA_DATABASE_URL / PYKNORA_WORKER_DATABASE_URL。
+      PYKNORA_PSQL_URL: postgresql://postgres:dev@127.0.0.1:5433/pyknora
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      # 不装 local-embed：这条门禁用的是确定性 hashing 嵌入（见下面 env），
+      # torch 一层几百 MB，装上既不必要也会拖慢 job。
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Apply all migrations
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(migrations/*.sql)
+          for f in "${files[@]}"; do
+            echo "==> $f"
+            psql "$PYKNORA_PSQL_URL" -v ON_ERROR_STOP=1 -v dim=512 -f "$f" >/dev/null
+          done
+
+      - name: Eval gate against committed baseline
+        env:
+          # 被测服务与入库 worker 各用一个非 owner 角色：CI 里顺带证明 0017 的角色接线没坏。
+          # 迁移仍用 postgres——建表、建策略、建角色都需要 owner。
+          PYKNORA_DATABASE_URL: postgresql+asyncpg://pyknora_app:pyknora_app_dev@127.0.0.1:5433/pyknora
+          PYKNORA_WORKER_DATABASE_URL: postgresql+asyncpg://pyknora_worker:pyknora_worker_dev@127.0.0.1:5433/pyknora
+          # 确定性嵌入：跑得快、无模型下载，但向量路没有语义能力。
+          # 所以这条门禁判的是"接线断没断、门控还拦不拦得住"，不是答案质量。
+          PYKNORA_EMBEDDING_BACKEND: hashing
+        run: uv run python scripts/eval_local.py --baseline eval/baselines/stub-hashing
+
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: eval/results/
+          if-no-files-found: warn
+          retention-days: 7
+
   audit:
     name: Dependency audit (pip-audit)
     runs-on: ubuntu-latest
