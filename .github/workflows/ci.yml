@@ -268,8 +268,10 @@ jobs:
           PYKNORA_APP_PSQL_URL: postgresql://pyknora_app:pyknora_app_dev@127.0.0.1:5433/pyknora
         run: |
           set -uo pipefail
+          # 注：GitHub 单条 annotation 会截断在 4 KB 左右，所以这里按 12 行一块拆成多条，
+          # 每条只带最有信息量的那一段。全量日志在 artifact 里。
           python3 - <<'PY'
-          import os, pathlib
+          import json, os, pathlib
 
           def esc(s: str) -> str:
               return s.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
@@ -277,45 +279,47 @@ jobs:
           tmp = pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp"))
           log_path = tmp / "eval-gate.log"
           text = log_path.read_text(errors="replace") if log_path.exists() else "(no eval-gate.log)"
+
+          # 门禁自身的输出从「== 门禁判决 ==」开始，前面几千行都是 uvicorn 访问日志。
           lines = text.splitlines()
-          parts = ["==== head 80 ====", *lines[:80], "==== tail 80 ====", *lines[-80:]]
+          verdict_at = next((i for i, ln in enumerate(lines) if "== 门禁判决 ==" in ln), None)
+          if verdict_at is None:
+              head = ["==== 没有找到门禁判决段，打印日志尾部 40 行 ====", *lines[-40:]]
+              blocks = [head]
+          else:
+              gate = lines[verdict_at:]
+              blocks = [gate[i : i + 12] for i in range(0, len(gate), 12)]
+
           results = sorted(pathlib.Path("eval/results").glob("ci-*"), key=lambda p: p.stat().st_mtime)
           if results:
-              summary = results[-1] / "summary.json"
-              if summary.exists():
-                  parts += ["==== summary ====", summary.read_text(errors="replace")[:2500]]
               raw = results[-1] / "raw.jsonl"
               if raw.exists():
-                  import json
                   rows = [json.loads(x) for x in raw.read_text(errors="replace").splitlines() if x.strip()]
-                  parts.append("==== raw 摘要（前 6 条 + 计数）====")
-                  for r in rows[:6]:
-                      parts.append(
-                          "{sid} status={st} cites={c} results={n} degraded={dg} err={ec} q={qh} c={ch} qtext={q}".format(
-                              sid=r.get("sample_id"), st=r.get("status"), c=len(r.get("citations") or []),
-                              n=len(r.get("results") or []),
-                              dg=json.dumps(r.get("degraded"), ensure_ascii=False), ec=r.get("error_code"),
-                              qh=r.get("query_http_status"), ch=r.get("chat_http_status"),
-                              q=(r.get("expected_answer") or r.get("gold_sha1_8") or "")[:40],
-                          )
-                      )
-                  parts.append("cites_empty={} of {}".format(
-                      sum(1 for r in rows if not (r.get("citations") or [])), len(rows)))
-                  deg = [r for r in rows if r.get("degraded")]
-                  parts.append("degraded_rows={} codes={}".format(
-                      len(deg), sorted({json.dumps(r.get("degraded"), ensure_ascii=False) for r in deg})[:5]))
-          print("::error title=eval gate::" + esc("\n".join(parts)))
+                  blocks.append(
+                      [
+                          "==== raw（前 8 条 + 计数）====",
+                          *[
+                              "{sid} status={st} cites={c} results={n} degraded={dg} err={ec} q={qh} c={ch}".format(
+                                  sid=r.get("sample_id"), st=r.get("status"), c=len(r.get("citations") or []),
+                                  n=len(r.get("results") or []),
+                                  dg=json.dumps(r.get("degraded"), ensure_ascii=False), ec=r.get("error_code"),
+                                  qh=r.get("query_http_status"), ch=r.get("chat_http_status"),
+                              )
+                              for r in rows[:8]
+                          ],
+                          "cites_empty={} of {}".format(
+                              sum(1 for r in rows if not (r.get("citations") or [])), len(rows)),
+                      ]
+                  )
+
+          for n, block in enumerate(blocks, 1):
+              print(f"::error title=eval gate #{n}::{esc(chr(10).join(block))}")
           PY
           psql "$PYKNORA_PSQL_URL" -At -F' | ' -c "select 'chunk_rows', count(*), count(embedding) from chunks" -c "select 'doc_rows', count(*) from documents" -c "select 'job_status', status, count(*) from ingestion_jobs group by status order by status" -c "select 'kb_rows', count(*) from knowledge_bases" 2>&1 | sed 's/%/%25/g' | while IFS= read -r line; do echo "::error title=eval db::${line}"; done
-          # 再用「应用角色 + 工作区上下文」数一遍：如果这里看得见、api 却 404，就是 RLS 上下文没传到；
-          # 如果这里也看不见，就是没提交（create 路由缺显式 commit）。
-          # workspace_id 必须先用 postgres 取——应用角色在 RLS 下没有上下文时自己也看不见任何行。
+          # 再用「应用角色 + 工作区上下文」数一遍：这里看得见而 api 404 → RLS 上下文没传到；
+          # 这里也看不见 → 没提交。注意 psql 的 -c 不做变量插值，workspace_id 必须拼进 SQL。
           WS_ID=$(psql "$PYKNORA_PSQL_URL" -At -c "select coalesce(workspace_id::text,'') from knowledge_bases limit 1")
-          psql "$PYKNORA_APP_PSQL_URL" -At -F' | ' -v ws="$WS_ID" \
-            -c "begin" \
-            -c "select set_config('app.workspace_id', :'ws', true)" \
-            -c "select 'app_role_kb_rows', count(*) from knowledge_bases" \
-            -c "commit" 2>&1 | sed 's/%/%25/g' | while IFS= read -r line; do echo "::error title=eval db app-role::${line}"; done
+          psql "$PYKNORA_APP_PSQL_URL" -At -c "begin; select set_config('app.workspace_id','${WS_ID}',true); select 'app_role_kb_rows: '||count(*) from knowledge_bases; commit;" 2>&1 | sed 's/%/%25/g' | while IFS= read -r line; do echo "::error title=eval db app-role::${line}"; done
 
       - name: Upload eval artifacts
         if: always()
