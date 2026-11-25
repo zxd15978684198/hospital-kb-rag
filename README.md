@@ -63,6 +63,9 @@ FastAPI  ──► PostgreSQL + pgvector
 
 ```bash
 cp .env.example .env        # 配置数据库口令、JWT 密钥、嵌入与对话模型
+# 其中 PYKNORA_CHAT_API_KEY 留空时 /chat 会回 503（chat model is not configured），
+# 这是有意为之：没配模型就不假装能答。只想跑通检索与门控的话，
+# `uv run python scripts/eval_local.py` 用假模型，不需要真 key。
 docker compose up -d --build --wait
 docker compose ps -a        # migrate 应为 Exited (0)
 ```

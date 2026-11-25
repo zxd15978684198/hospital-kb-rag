@@ -29,6 +29,43 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DSN = "postgresql+asyncpg://pyknora_app:pyknora_app_dev@127.0.0.1:5433/pyknora"
 
+# 假模型不校验鉴权，但**被测服务**在 `chat_api_key` 为空时会直接回
+# `503 DEPENDENCY_UNAVAILABLE chat model is not configured`（answer.py:348，
+# 这是对的：没配 key 是运维问题，不该先判"资料不足"）。所以这里必须给一个占位 key。
+#
+# 为什么踩过：本地 `.env` 里有真的 `PYKNORA_CHAT_API_KEY`，所以本地一直绿；
+# CI 里没有 `.env`，key 为空 —— 于是 30 条样本全是 503、citations 全空，
+# 门禁报的却是"检索退化"，排查方向被带偏了整整两轮。
+STUB_CHAT_API_KEY = "stub-not-a-secret"
+
+
+def build_env(
+    api_dsn: str,
+    stub_url: str,
+    *,
+    base: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """被测服务与 stub 共用的环境。
+
+    数据源是 `base`（默认 `os.environ`）：本地有 `.env` 时它会被 pydantic-settings
+    读进 Settings，但**子进程不继承 .env**，只继承这里给的东西 —— 所以凡是
+    "被测服务必须有值"的项都得在这显式写，不能指望 `.env` 兜底。
+    """
+    return {
+        **(base if base is not None else os.environ),
+        "PYKNORA_DATABASE_URL": api_dsn,
+        "PYKNORA_CHAT_BASE_URL": stub_url,
+        "PYKNORA_CHAT_MODEL": "stub",
+        # 见 STUB_CHAT_API_KEY 的注释：空 key 会让被测服务直接 503。
+        "PYKNORA_CHAT_API_KEY": STUB_CHAT_API_KEY,
+        # 嵌入后端固定走 hashing：CI runner 上没有 bge 模型缓存，且 hashing 是确定性的。
+        # 代价是向量路召回没有语义能力，所以这条门禁只验接线与安全，不产质量数字。
+        "PYKNORA_EMBEDDING_BACKEND": os.environ.get("PYKNORA_EMBEDDING_BACKEND", "hashing"),
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "PYTHONUNBUFFERED": "1",
+    }
+
 
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -81,18 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     stub_port, api_port = free_port(), free_port()
     stub_url = f"http://127.0.0.1:{stub_port}/v1"
     api_root = f"http://127.0.0.1:{api_port}"
-    env = {
-        **os.environ,
-        "PYKNORA_DATABASE_URL": api_dsn,
-        "PYKNORA_CHAT_BASE_URL": stub_url,
-        "PYKNORA_CHAT_MODEL": "stub",
-        # 嵌入后端固定走 hashing：CI runner 上没有 bge 模型缓存，且 hashing 是确定性的。
-        # 代价是向量路召回没有语义能力，所以这条门禁只验接线与安全，不产质量数字。
-        "PYKNORA_EMBEDDING_BACKEND": os.environ.get("PYKNORA_EMBEDDING_BACKEND", "hashing"),
-        "HF_HUB_OFFLINE": "1",
-        "TRANSFORMERS_OFFLINE": "1",
-        "PYTHONUNBUFFERED": "1",
-    }
+    env = build_env(api_dsn, stub_url)
 
     stub: subprocess.Popen | None = None
     worker: subprocess.Popen | None = None
