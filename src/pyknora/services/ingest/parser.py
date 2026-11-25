@@ -20,7 +20,8 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from pyknora.core.errors import AppError, ErrorCode
-from pyknora.schemas.locator import Locator
+from pyknora.schemas.locator import Locator, PageLocator, ParaLocator, TableLocator
+from pyknora.services.ingest.clause import extract_clause
 
 if TYPE_CHECKING:  # pragma: no cover — 视觉信号只在 PDF 入口用到，运行时延迟引入
     from pyknora.services.ingest.parsers.vision import PageSignals
@@ -138,6 +139,10 @@ def _check_allowed(filename: str, content_type: str | None) -> str:
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
+#: 标题路径的分隔符。不同解析器拼法不同：docx/odf 用 ` > `，md/txt 用 ` / `。
+#: 补条款号时要按它切开逐级回找，写死一种分隔符会让另一类格式静默失效。
+_HEADING_SPLIT = re.compile(r"\s*[>/]\s*")
+
 
 # PDF 不再走本模块：ADR 0008 D5 把主路径换成 `pdfplumber`（字符级 bbox + 表格检测），
 # 实现在 `parsers/pdf.py`（一次 open、>100 页分批、表格准入四条）。原先这里的 pypdf
@@ -162,9 +167,21 @@ def _parse_docx(data: bytes) -> ParsedText:
             if style.startswith("heading"):
                 level = int(style.replace("heading", "").strip() or 1)
                 heading_stack = heading_stack[: level - 1] + [text]
-                blocks.append(Block(text=text, heading_path=" / ".join(heading_stack)))
+                blocks.append(
+                    Block(
+                        text=text,
+                        heading_path=" / ".join(heading_stack),
+                        locator=ParaLocator(index=len(blocks) + 1),
+                    )
+                )
             else:
-                blocks.append(Block(text=text, heading_path=" / ".join(heading_stack) or None))
+                blocks.append(
+                    Block(
+                        text=text,
+                        heading_path=" / ".join(heading_stack) or None,
+                        locator=ParaLocator(index=len(blocks) + 1),
+                    )
+                )
     except Exception as exc:  # noqa: BLE001 — 同上，按类名记录
         raise AppError(
             ErrorCode.PARSE_FAILED,
@@ -185,11 +202,26 @@ def _parse_text(data: bytes, *, markdown: bool) -> ParsedText:
     heading_stack: list[str] = []
     buffer: list[str] = []
 
+    def _next_locator() -> ParaLocator:
+        """段落序号从 1 起，按"解析出来的第几块"计（不是文件里的物理行号）。
+
+        以前这里不填 locator（ADR 0008 早期写的是"S2/S4 之后回填"），结果 md/txt
+        的引用永远只能给人看 snippet：`page_no` 也没有、`locator` 也没有。给段落序号
+        是这份解析器**本来就知道**的信息，没有理由不给。
+        """
+        return ParaLocator(index=len(blocks) + 1)
+
     def flush() -> None:
         if buffer:
             joined = "\n".join(buffer).strip()
             if joined:
-                blocks.append(Block(text=joined, heading_path=" / ".join(heading_stack) or None))
+                blocks.append(
+                    Block(
+                        text=joined,
+                        heading_path=" / ".join(heading_stack) or None,
+                        locator=_next_locator(),
+                    )
+                )
             buffer.clear()
 
     for line in text.splitlines():
@@ -198,7 +230,13 @@ def _parse_text(data: bytes, *, markdown: bool) -> ParsedText:
             flush()
             level = len(match.group(1))
             heading_stack = heading_stack[: level - 1] + [match.group(2).strip()]
-            blocks.append(Block(text=line.strip(), heading_path=" / ".join(heading_stack)))
+            blocks.append(
+                Block(
+                    text=line.strip(),
+                    heading_path=" / ".join(heading_stack),
+                    locator=_next_locator(),
+                )
+            )
         elif not line.strip():
             flush()
         else:
@@ -220,7 +258,8 @@ def _parse_html(data: bytes) -> ParsedText:
         cleaned = re.sub(r"(?s)<[^>]+>", " ", part)
         cleaned = re.sub(r"[ \t]+", " ", cleaned).strip()
         if cleaned:
-            blocks.append(Block(text=cleaned))
+            # 段落序号同 md/docx：没有它，HTML 引用的 locator 只能是空。
+            blocks.append(Block(text=cleaned, locator=ParaLocator(index=len(blocks) + 1)))
     if not blocks:
         raise AppError(ErrorCode.PARSE_FAILED, "HTML 未提取到任何文本")
     return ParsedText(blocks=blocks, parser="regex-html")
@@ -370,18 +409,51 @@ def _parse_pdf(data: bytes, filename: str) -> ParsedText:
     return parsed
 
 
+def _enrich_clause(parsed: ParsedText) -> ParsedText:
+    """给文本类 `locator` 补条款号（`clause`），见 `services/ingest/clause.py`。
+
+    为什么统一放在 `parse()` 出口、而不是让六个解析器各写一遍：
+    1. 六个解析器关心的是"怎么从字节里抠出位置"，条款号是**文本特征**，与格式无关；
+       让 pdf/docx/odf/eml 各写一份正则，必然出现五种口径；
+    2. 出口只有一个地方，将来加一种格式也不会漏接线；
+    3. `Block.locator` 是 frozen 的 pydantic 模型，这里用 `model_copy(update=...)`
+       换一份新对象，而不是就地改字段——`locator` 万一被别处持有引用也不会被悄悄改掉。
+
+    只给 `page` / `para` / `table` 三种 kind 补：电子表格要的是 `B2:C4`、幻灯片要的是
+    第几页，硬塞条款号进 `sheet` / `slide` / `region` 只会让前端多一个判断分支。
+
+    抽不到就**不动** locator（`clause` 保持 `None`），不拿标题或段落序号凑数。
+    """
+    for block in parsed.blocks:
+        locator = block.locator
+        if not isinstance(locator, PageLocator | ParaLocator | TableLocator):
+            continue
+        clause = extract_clause(block.text)
+        if clause is None and block.heading_path:
+            # 标题路径有两种拼法：docx/odf 用 `A > B`，md/txt 用 `A / B`。
+            # 从最细的一级往回找——条款号通常挂在最后一个标题上。
+            for segment in reversed(_HEADING_SPLIT.split(block.heading_path)):
+                clause = extract_clause(segment)
+                if clause is not None:
+                    break
+        if clause is None:
+            continue
+        block.locator = locator.model_copy(update={"clause": clause})
+    return parsed
+
+
 def parse(data: bytes, filename: str, content_type: str | None = None) -> ParsedText:
     """按后缀分派解析器。格式不在白名单时抛 UNSUPPORTED_FORMAT。"""
     suffix = _check_allowed(filename, content_type)
     if suffix == ".pdf":
-        return _parse_pdf(data, filename)
+        return _enrich_clause(_parse_pdf(data, filename))
     if suffix == ".docx":
-        return _parse_docx(data)
+        return _enrich_clause(_parse_docx(data))
     if suffix in {".md", ".markdown"}:
-        return _parse_text(data, markdown=True)
+        return _enrich_clause(_parse_text(data, markdown=True))
     if suffix in {".html", ".htm"}:
-        return _parse_html(data)
+        return _enrich_clause(_parse_html(data))
     submodule = _PARSUB_MODULES.get(suffix)
     if submodule is not None:
-        return _parse_via_submodule(submodule, data, filename)
-    return _parse_text(data, markdown=False)
+        return _enrich_clause(_parse_via_submodule(submodule, data, filename))
+    return _enrich_clause(_parse_text(data, markdown=False))

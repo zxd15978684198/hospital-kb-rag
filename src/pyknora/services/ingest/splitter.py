@@ -155,15 +155,46 @@ def chunk_parsed(
                 return index
         return len(parsed.blocks)  # pragma: no cover — spans 已覆盖整篇 full_text
 
+    def clause_at(offset: int) -> str | None:
+        """偏移处「正在生效的条款号」（`第十二条` / `3.2`）。
+
+        口径与 `locator_at` **不同**，别混用：`locator_at` 取的是"起点落在哪一块"，
+        所以起点那块没编号时它就是 `None`；而条款在正文里是**一直有效到下一条款
+        开始**的，一个 512 字切片经常从半句话开始，它仍归上一条款管。这里按文档
+        顺序维护"最近一条开始的条款"，落在条款之间的偏移都归到那一条。
+
+        这不算推断（"不许编"的规则依然成立）：条款起止完全由正文顺序决定，同一份
+        文件两次解析结论一致；已知局限是"一个切片跨了两条款"时只标起始那条——
+        引用点过去看到的是切片开头，按起点报比按覆盖范围报更不容易误导。
+        """
+        current: str | None = None
+        for start, end, block, _index in spans:
+            if block.locator is not None:
+                block_clause = getattr(block.locator, "clause", None)
+                if block_clause is not None:
+                    current = block_clause
+            if start <= offset < end:
+                return current
+        return current
+
     def locator_at(offset: int) -> Locator | None:
         """偏移所在块的结构化位置（ADR 0008 D2）。
 
         口径与 `page_at` 一致：取**起点**所在块的位置，跨块 chunk 不拆分位置。
         表格块不在 `spans` 里（D3-1），它们各自独立成块时自带 locator。
+
+        条款号单独补一次：块自带的 `clause` 只在"这一块正是条款开头"时才有值，
+        而切片起点常常落在条款中间，此时用 `clause_at` 回填"正在生效的那一条"。
         """
         for start, end, block, _index in spans:
             if start <= offset < end:
-                return block.locator
+                locator = block.locator
+                if locator is None or getattr(locator, "clause", None) is not None:
+                    return locator
+                clause = clause_at(offset)
+                if clause is None:
+                    return locator
+                return locator.model_copy(update={"clause": clause})
         return None
 
     # (块序号, 块内起始偏移, chunk)：先收集，最后按文档顺序排一次再编号 ordinal。

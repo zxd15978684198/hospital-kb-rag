@@ -82,16 +82,17 @@ def test_block_keeps_locator_when_given() -> None:
         (b"<p>alpha</p><p>beta</p>", "a.html"),
     ],
 )
-def test_existing_parsers_do_not_crash_and_leave_locator_empty(
-    payload: bytes, filename: str
-) -> None:
-    """四个解析器只需"不崩"：本节点不填 locator，也不产出表格块。
+def test_existing_parsers_do_not_crash_and_fill_locator(payload: bytes, filename: str) -> None:
+    """解析器要"不崩"，并且**给出段落序号**。
 
-    后续 S2/S4 节点真正回填 `locator` 后，`is None` 这条断言应改成"非 None"。
+    这条断言原来是 `is None`（当时 locator 只是承载位）；现在 md/txt/html 的块都带
+    `ParaLocator(index=...)`，序号从 1 连续递增——没有编号，引用就只能退回 snippet，
+    点不过去。
     """
     parsed = parse(payload, filename)
     assert parsed.blocks
-    assert all(b.locator is None for b in parsed.blocks)
+    assert all(isinstance(b.locator, ParaLocator) for b in parsed.blocks)
+    assert [b.locator.index for b in parsed.blocks] == list(range(1, len(parsed.blocks) + 1))
     assert all(b.is_tabular is False for b in parsed.blocks)
 
 

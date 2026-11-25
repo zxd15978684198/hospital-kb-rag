@@ -46,6 +46,12 @@ class PageLocator(_LocatorBase):
     kind: Literal["page"] = "page"
     page: int = Field(ge=1, description="从 1 开始的页码")
     heading: str | None = None
+    clause: str | None = None
+    """条款号（`第十二条` / `3.2`），由 `services/ingest/clause.py` 从块正文抽。
+
+    为什么页码不够：制度类文档被引用的是条款，`第 12 页` 还要人自己翻一眼。
+    抽不出来时**必须**是 `None`——不要用标题凑、不要退回段落序号。
+    """
 
 
 class ParaLocator(_LocatorBase):
@@ -58,6 +64,7 @@ class ParaLocator(_LocatorBase):
     kind: Literal["para"] = "para"
     index: int | None = Field(default=None, ge=1, description="从 1 开始的段落序号")
     heading: str | None = None
+    clause: str | None = Field(default=None, description="条款号（见 `PageLocator.clause`）")
 
 
 class SheetLocator(_LocatorBase):
@@ -95,6 +102,7 @@ class TableLocator(_LocatorBase):
     # 只读 locator，落库后 `locator_ref` 里就只剩「第几张表」，回指不到页。
     # 三个容器字段互不冲突，各自表达「这张表挂在哪个容器里」，都可以是 None。
     page: int | None = Field(default=None, ge=1, description="所在页码（PDF）")
+    clause: str | None = Field(default=None, description="条款号（见 `PageLocator.clause`）")
 
 
 class RegionLocator(_LocatorBase):
