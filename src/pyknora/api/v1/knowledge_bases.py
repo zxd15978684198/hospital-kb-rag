@@ -83,11 +83,12 @@ def _expected_version(if_match: str | None) -> int:
 async def create(
     body: KnowledgeBaseCreate,
     scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
     repo: Annotated[Any, Depends(get_kb_repo)],
 ) -> KnowledgeBase:
     if body.chunk_overlap >= body.chunk_size:
         raise AppError(ErrorCode.INVALID_REQUEST, "chunk_overlap must be less than chunk_size")
-    return await create_knowledge_base(
+    kb = await create_knowledge_base(
         repo,
         scope,
         name=body.name,
@@ -99,6 +100,11 @@ async def create(
             normalize=body.normalize,
         ),
     )
+    # 必须在这里提交：`get_session` 是 yield 依赖，它的 commit 在响应发出之后才执行，
+    # 所以不显式提交的话 201 会早于落库——客户端拿着 kb_id 立刻上传文档，
+    # 上游查这一行还看不见，返回 RESOURCE_NOT_FOUND（CI 上就是这么红的）。
+    await session.commit()
+    return kb
 
 
 @router.get(
@@ -161,16 +167,20 @@ async def patch(
     kb_id: UUID,
     body: KnowledgeBasePatch,
     scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
     repo: Annotated[Any, Depends(get_kb_repo)],
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> KnowledgeBase:
-    return await rename_knowledge_base(
+    kb = await rename_knowledge_base(
         repo,
         scope,
         kb_id,
         name=body.name,
         expected_version=_expected_version(if_match),
     )
+    # 同 create：提交要锁在响应之前，否则 PATCH 的 200 也是「还没改名」。
+    await session.commit()
+    return kb
 
 
 @router.delete(
@@ -196,6 +206,8 @@ async def remove(
         kb_id,
         expected_version=_expected_version(if_match),
     )
+    # 软删 + 级联 + outbox 都在同一个事务里，提交锁在 202 之前。
+    await session.commit()
     response.headers["ETag"] = f'"{deleted.row_version}"'
     return KnowledgeBaseDeleted(
         kb_id=deleted.kb_id,

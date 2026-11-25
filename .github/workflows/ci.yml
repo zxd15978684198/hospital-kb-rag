@@ -264,6 +264,8 @@ jobs:
         if: failure() && steps.eval.outcome == 'failure'
         env:
           PYKNORA_PSQL_URL: postgresql://postgres:dev@127.0.0.1:5433/pyknora
+          # 和第 5 步被测服务同一个角色，用来判断"是没提交还是被 RLS 挡了"。
+          PYKNORA_APP_PSQL_URL: postgresql://pyknora_app:pyknora_app_dev@127.0.0.1:5433/pyknora
         run: |
           set -uo pipefail
           python3 - <<'PY'
@@ -305,6 +307,15 @@ jobs:
           print("::error title=eval gate::" + esc("\n".join(parts)))
           PY
           psql "$PYKNORA_PSQL_URL" -At -F' | ' -c "select 'chunk_rows', count(*), count(embedding) from chunks" -c "select 'doc_rows', count(*) from documents" -c "select 'job_status', status, count(*) from ingestion_jobs group by status order by status" -c "select 'kb_rows', count(*) from knowledge_bases" 2>&1 | sed 's/%/%25/g' | while IFS= read -r line; do echo "::error title=eval db::${line}"; done
+          # 再用「应用角色 + 工作区上下文」数一遍：如果这里看得见、api 却 404，就是 RLS 上下文没传到；
+          # 如果这里也看不见，就是没提交（create 路由缺显式 commit）。
+          # workspace_id 必须先用 postgres 取——应用角色在 RLS 下没有上下文时自己也看不见任何行。
+          WS_ID=$(psql "$PYKNORA_PSQL_URL" -At -c "select coalesce(workspace_id::text,'') from knowledge_bases limit 1")
+          psql "$PYKNORA_APP_PSQL_URL" -At -F' | ' -v ws="$WS_ID" \
+            -c "begin" \
+            -c "select set_config('app.workspace_id', :'ws', true)" \
+            -c "select 'app_role_kb_rows', count(*) from knowledge_bases" \
+            -c "commit" 2>&1 | sed 's/%/%25/g' | while IFS= read -r line; do echo "::error title=eval db app-role::${line}"; done
 
       - name: Upload eval artifacts
         if: always()
