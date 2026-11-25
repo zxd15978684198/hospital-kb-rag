@@ -262,18 +262,30 @@ jobs:
           uv run python scripts/eval_local.py --baseline eval/baselines/stub-hashing 2>&1 | tee "$RUNNER_TEMP/eval-gate.log"
       - name: Surface eval failure
         if: failure() && steps.eval.outcome == 'failure'
+        env:
+          PYKNORA_PSQL_URL: postgresql://postgres:dev@127.0.0.1:5433/pyknora
         run: |
           set -uo pipefail
-          if [ ! -f "$RUNNER_TEMP/eval-gate.log" ]; then
-            echo "::error title=eval gate::没有产生 eval-gate.log（脚本在 tee 之前就退出了）"
-            exit 0
-          fi
-          echo "::group::eval-gate.log (tail 80)"
-          tail -n 80 "$RUNNER_TEMP/eval-gate.log"
-          echo "::endgroup::"
-          tail -n 25 "$RUNNER_TEMP/eval-gate.log" | sed 's/%/%25/g; s/\r//g' | while IFS= read -r line; do
-            echo "::error title=eval gate::${line}"
-          done
+          python3 - <<'PY'
+          import os, pathlib
+
+          def esc(s: str) -> str:
+              return s.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+
+          tmp = pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp"))
+          log_path = tmp / "eval-gate.log"
+          text = log_path.read_text(errors="replace") if log_path.exists() else "(no eval-gate.log)"
+          lines = text.splitlines()
+          parts = ["==== head 60 ====", *lines[:60], "==== tail 60 ====", *lines[-60:]]
+          results = sorted(pathlib.Path("eval/results").glob("ci-*"), key=lambda p: p.stat().st_mtime)
+          if results:
+              summary = results[-1] / "summary.json"
+              if summary.exists():
+                  parts += ["==== summary ====", summary.read_text(errors="replace")[:3000]]
+          print("::error title=eval gate::" + esc("\n".join(parts)))
+          PY
+          psql "$PYKNORA_PSQL_URL" -At -F' | ' -c "select 'chunk_rows', count(*) from chunks" -c "select 'doc_rows', count(*) from documents" -c "select 'job_status', status, count(*) from ingestion_jobs group by status order by status" -c "select 'kb_rows', count(*) from knowledge_bases" 2>&1 | sed 's/%/%25/g' | while IFS= read -r line; do echo "::error title=eval db::${line}"; done
+
       - name: Upload eval artifacts
         if: always()
         uses: actions/upload-artifact@v4
