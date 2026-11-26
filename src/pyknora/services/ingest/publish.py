@@ -8,13 +8,14 @@ index_builds 状态、ingestion_jobs 状态、job_attempts 结果、outbox 事�
 **发布事务的完整足迹**（六步，按序不可换）：
 1. 锁 documents 行                      ← 拿写锁，序列化同一文档的并发发布
 2. 校验 attempt / lease_epoch / version ← 不合格直接抛 STALE_ATTEMPT
-3. 分配 index_version（在锁内）          ← 保证同一文档版本号单调不减
+3. 校验 index_version 更大（锁内）      ← 保证同一文档版本号单调不减
 4. 旧 active build → retired             ← 必须先退休再上新，否则视图会短暂看到两个
 5. 新 build → active + 切 documents 指针 ← 视图可见性在此刻翻转
 6. job → succeeded + 写 outbox           ← 与指针同一事务，不存在"发布成功但通知丢了"
 
-**最容易写错的地方**：把第 3 步放到锁外。两个 Worker 并发发布会拿到同一个
-号，然后其中一个覆盖另一个——这正是我们要防的场景。
+**最容易写错的地方**：把第 3 步的校验放到锁外。号是 Worker 建 build 时取的
+（`active + 1`），两个 Worker 并发时**会拿到同一个号**；锁内那句"必须比当前
+active 新"是唯一把它们串起来的地方，挪出去就变成后到的覆盖先到的。
 """
 
 from __future__ import annotations
@@ -194,7 +195,7 @@ async def publish(
     if actual_count == 0:
         raise AppError(ErrorCode.INDEX_INCOMPLETE, "refusing to publish an empty build")
 
-    # ---- 第 3 步：分配 index_version（锁内） ----
+    # ---- 第 3 步：校验 index_version（锁内；号在 Worker 建 build 时已取） ----
     # 允许跳号（中间有失败的重试），但不允许回退——回退意味着旧 build 覆盖新索引
     active_version = document.active_index_version or 0
     if build.index_version <= active_version:
